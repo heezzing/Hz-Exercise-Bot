@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  db:
+    build:
+      context: .
+      dockerfile: Dockerfile.db
+    container_name: workout_db
+    environment:
+      POSTGRES_USER: workout
+      POSTGRES_PASSWORD: workout1234
+      POSTGRES_DB: workout_curation
+    ports:
+      - "5432:5432"
+    volumes:
+      - workout_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workout -d workout_curation"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  workout_pgdata:
