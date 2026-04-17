@@ -1,4 +1,4 @@
-import pool from '../db';
+import db from '../db';
 
 interface Survey {
   social_pref?: string;
@@ -14,6 +14,10 @@ interface Survey {
   liked_aspect?: string;
   quit_reason?: string;
   mbti?: string;
+  budget?: number;
+  user_name?: string;
+  age?: number;
+  preferred_time?: string;
   [key: string]: unknown;
 }
 
@@ -23,12 +27,16 @@ interface Sport {
   cost_level: number;
   injury_risk: number;
   social_level: number;
-  indoor: boolean;
-  tags: string[];
+  indoor: number | boolean;
+  tags: string | string[];
   similarity?: number;
 }
 
-// 설문 → 임베딩 쿼리 텍스트 변환
+function getTags(sport: Sport): string[] {
+  if (Array.isArray(sport.tags)) return sport.tags;
+  try { return JSON.parse(sport.tags as string); } catch { return []; }
+}
+
 function surveyToQueryText(survey: Survey): string {
   const parts: string[] = [];
   if (survey.social_pref === '혼자') parts.push('혼자 조용히 집중하는 개인 운동');
@@ -41,16 +49,14 @@ function surveyToQueryText(survey: Survey): string {
 
   if (survey.activity_level === '거의 없음') parts.push('입문자 친화 저강도');
   else if (survey.activity_level === '주 3회 이상') parts.push('고강도 체력 단련');
-
   if (survey.avoid) parts.push(`기피: ${survey.avoid}`);
   return parts.join(' / ');
 }
 
-// pgvector 코사인 유사도 검색
+// Turso 네이티브 벡터 검색
 export async function vectorSearchSports(survey: Survey, topK = 5): Promise<Sport[]> {
   let queryVec: number[] | null = null;
   try {
-    // @xenova/transformers 동적 임포트 (실패 시 fallback)
     const { pipeline } = await import('@xenova/transformers');
     const extractor = await pipeline(
       'feature-extraction',
@@ -60,29 +66,32 @@ export async function vectorSearchSports(survey: Survey, topK = 5): Promise<Spor
     const output = await extractor(queryText, { pooling: 'mean', normalize: true });
     queryVec = Array.from(output.data as Float32Array);
   } catch {
-    // 모델 로드 실패 → tag-based fallback
     return [];
   }
 
   if (!queryVec) return [];
 
   try {
-    const result = await pool.query<Sport>(
-      `SELECT id, name, cost_level, injury_risk, social_level, indoor, tags,
-              1 - (embedding <=> CAST($1 AS vector)) AS similarity
-       FROM sports
-       WHERE embedding IS NOT NULL
-       ORDER BY embedding <=> CAST($1 AS vector)
-       LIMIT $2`,
-      [JSON.stringify(queryVec), topK],
-    );
-    return result.rows;
+    // Turso vector_distance_cos 사용
+    const vecJson = JSON.stringify(queryVec);
+    const result = await db.execute({
+      sql: `SELECT id, name, cost_level, injury_risk, social_level, indoor, tags,
+                   vector_distance_cos(embedding, vector(?)) AS distance
+            FROM sports
+            WHERE embedding IS NOT NULL
+            ORDER BY distance
+            LIMIT ?`,
+      args: [vecJson, topK],
+    });
+    return result.rows.map((r) => ({
+      ...(r as unknown as Sport),
+      similarity: 1 - (r.distance as number),
+    }));
   } catch {
     return [];
   }
 }
 
-// tag-based fallback 필터
 export function filterSportsBySurvey(sports: Sport[], survey: Survey): Sport[] {
   const avoid = (survey.avoid ?? '').toLowerCase();
   const socialPref = survey.social_pref ?? '';
@@ -90,7 +99,7 @@ export function filterSportsBySurvey(sports: Sport[], survey: Survey): Sport[] {
 
   const score = (s: Sport): number => {
     let pts = 0;
-    const tags = (s.tags ?? []).join(' ').toLowerCase();
+    const tags = getTags(s).join(' ').toLowerCase();
     const name = s.name.toLowerCase();
     if (avoid && avoid.split(',').some((kw) => name.includes(kw) || tags.includes(kw))) return -999;
     if (socialPref === '혼자' && s.social_level <= 2) pts += 2;
@@ -107,19 +116,18 @@ export function filterSportsBySurvey(sports: Sport[], survey: Survey): Sport[] {
     .slice(0, 5);
 }
 
-// 검색 결과 → Hermes 프롬프트용 텍스트
 export function buildRagContext(sports: Sport[]): string {
   if (!sports.length) return '참고 종목 정보 없음';
   return sports
     .slice(0, 3)
     .map((s) => {
       const sim = s.similarity !== undefined ? `, 유사도=${s.similarity.toFixed(2)}` : '';
-      return `- ${s.name}: 비용수준=${s.cost_level}/5, 부상위험=${s.injury_risk}/5, 사교성=${s.social_level}/5, 실내=${ s.indoor ? '예' : '아니오'}, 태그=${(s.tags ?? []).join(',')}${sim}`;
+      const indoor = s.indoor === 1 || s.indoor === true ? '예' : '아니오';
+      return `- ${s.name}: 비용수준=${s.cost_level}/5, 부상위험=${s.injury_risk}/5, 사교성=${s.social_level}/5, 실내=${indoor}, 태그=${getTags(s).join(',')}${sim}`;
     })
     .join('\n');
 }
 
-// 사용자 정보 + RAG 컨텍스트 → Hermes 추천 프롬프트
 export function buildUserPrompt(survey: Survey, ragSports: Sport[]): string {
   const ragContext = buildRagContext(ragSports);
   const lines: string[] = [];

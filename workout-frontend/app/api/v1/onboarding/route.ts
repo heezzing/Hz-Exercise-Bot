@@ -1,70 +1,67 @@
 import { NextRequest, NextResponse } from 'next/server';
-import pool from '@/lib/db';
+import db from '@/lib/db';
 import { getSportRecommendations } from '@/lib/services/hermes';
 import { vectorSearchSports, filterSportsBySurvey, buildUserPrompt } from '@/lib/services/rag';
 
 export async function POST(req: NextRequest) {
   try {
     const survey = await req.json();
-
     if (!survey.user_name || !survey.age) {
       return NextResponse.json({ detail: 'user_name과 age는 필수입니다.' }, { status: 422 });
     }
 
     // 1. 사용자 저장
-    const { rows: userRows } = await pool.query(
-      `INSERT INTO users (name, age, location_lat, location_lng, lifestyle_vector)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [
+    const userId = crypto.randomUUID();
+    await db.execute({
+      sql: `INSERT INTO users (id, name, age, location_lat, location_lng, lifestyle_vector)
+            VALUES (?, ?, ?, ?, ?, ?)`,
+      args: [
+        userId,
         survey.user_name,
         survey.age,
         survey.location_lat ?? null,
         survey.location_lng ?? null,
         JSON.stringify(survey),
       ],
-    );
-    const userId = userRows[0].id as string;
+    });
 
-    // 2. RAG 검색 (pgvector → tag-based fallback)
+    // 2. RAG 검색 (벡터 → tag-based fallback)
     let ragSports = await vectorSearchSports(survey);
     if (!ragSports.length) {
-      const { rows: allSports } = await pool.query(
-        `SELECT id, name, cost_level, injury_risk, social_level, indoor, tags FROM sports`,
-      );
-      ragSports = filterSportsBySurvey(allSports, survey);
+      const all = await db.execute(`SELECT id, name, cost_level, injury_risk, social_level, indoor, tags FROM sports`);
+      ragSports = filterSportsBySurvey(all.rows as never, survey);
     }
 
     // 3. Hermes 추천
     const userPrompt = buildUserPrompt(survey, ragSports);
     const hermes = await getSportRecommendations(userPrompt);
 
-    // 4. 추천 저장
-    const topSportRow = await pool.query(
-      `SELECT id FROM sports WHERE name ILIKE $1 LIMIT 1`,
-      [hermes.top_pick],
-    );
-    const topSportId: string | null = topSportRow.rows[0]?.id ?? null;
+    // 4. top_pick 스포츠 ID 조회
+    const sportRes = await db.execute({
+      sql: `SELECT id FROM sports WHERE name = ? LIMIT 1`,
+      args: [hermes.top_pick],
+    });
+    const topSportId: string | null = (sportRes.rows[0]?.id as string) ?? null;
 
-    const { rows: recRows } = await pool.query(
-      `INSERT INTO recommendations (user_id, sport_ids, hermes_reasoning)
-       VALUES ($1, $2, $3) RETURNING id`,
-      [userId, topSportId ? [topSportId] : [], hermes.encouragement],
-    );
-    const recommendationId = recRows[0].id as string;
+    // 5. 추천 저장
+    const recommendationId = crypto.randomUUID();
+    await db.execute({
+      sql: `INSERT INTO recommendations (id, user_id, sport_ids, hermes_reasoning)
+            VALUES (?, ?, ?, ?)`,
+      args: [recommendationId, userId, JSON.stringify(topSportId ? [topSportId] : []), hermes.encouragement],
+    });
 
-    // 5. 레벨1 미션 생성
+    // 6. 레벨1 미션 생성
     const firstMission =
       hermes.recommendations[0]?.first_mission ?? `${hermes.top_pick} 체험권으로 첫 방문해보세요!`;
-
     const dueDate = new Date();
     dueDate.setDate(dueDate.getDate() + 7);
-
-    const { rows: missionRows } = await pool.query(
-      `INSERT INTO user_missions (user_id, sport_id, mission_text, level, due_date)
-       VALUES ($1, $2, $3, 1, $4) RETURNING id`,
-      [userId, topSportId, firstMission, dueDate],
-    );
-    const missionId = missionRows[0].id as string;
+    const missionId = crypto.randomUUID();
+    await db.execute({
+      sql: `INSERT INTO user_missions (id, user_id, sport_id, mission_text, level, due_date)
+            VALUES (?, ?, ?, ?, 1, ?)`,
+      args: [missionId, userId, topSportId, firstMission, dueDate.toISOString().split('T')[0]],
+    });
 
     return NextResponse.json({
       user_id: userId,

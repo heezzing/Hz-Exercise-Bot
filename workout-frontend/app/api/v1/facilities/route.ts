@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import pool from '@/lib/db';
+import db from '@/lib/db';
 
 export async function GET(req: NextRequest) {
   try {
@@ -13,26 +13,27 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ detail: 'sport, lat, lng는 필수입니다.' }, { status: 422 });
     }
 
-    const { rows } = await pool.query(
-      `SELECT f.id, f.name, f.address, f.phone, f.rating, f.cost_per_session,
-              ST_Distance(
-                f.location::geography,
-                ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography
-              ) AS distance_m
-       FROM facilities f
-       JOIN sports s ON s.id = f.sport_id
-       WHERE s.name ILIKE $1
-         AND ST_DWithin(
-               f.location::geography,
-               ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography,
-               $4
-             )
-       ORDER BY distance_m
-       LIMIT 20`,
-      [sport, lng, lat, radiusM],
-    );
+    // Haversine 공식으로 거리 계산 (PostGIS 대체)
+    const result = await db.execute({
+      sql: `SELECT f.id, f.name, f.address, f.phone, f.rating, f.cost_per_session,
+                   6371000 * 2 * asin(sqrt(
+                     (sin((f.lat - ?) * 3.14159265358979 / 360.0)) *
+                     (sin((f.lat - ?) * 3.14159265358979 / 360.0)) +
+                     cos(f.lat * 3.14159265358979 / 180.0) *
+                     cos(? * 3.14159265358979 / 180.0) *
+                     (sin((f.lng - ?) * 3.14159265358979 / 360.0)) *
+                     (sin((f.lng - ?) * 3.14159265358979 / 360.0))
+                   )) AS distance_m
+            FROM facilities f
+            JOIN sports s ON s.id = f.sport_id
+            WHERE s.name = ?
+            HAVING distance_m <= ?
+            ORDER BY distance_m
+            LIMIT 20`,
+      args: [lat, lat, lat, lng, lng, sport, radiusM],
+    });
 
-    return NextResponse.json(rows);
+    return NextResponse.json(result.rows);
   } catch (e: unknown) {
     console.error('[facilities error]', e);
     return NextResponse.json({ detail: String(e) }, { status: 500 });
