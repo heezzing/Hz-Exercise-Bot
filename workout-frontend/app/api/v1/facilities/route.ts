@@ -13,21 +13,24 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ detail: 'sport, lat, lng는 필수입니다.' }, { status: 422 });
     }
 
-    // Haversine 공식으로 거리 계산 (PostGIS 대체)
+    // 서브쿼리로 감싸서 WHERE distance_m <= ? 사용 (SQLite HAVING alias 미지원)
     const result = await db.execute({
-      sql: `SELECT f.id, f.name, f.address, f.phone, f.rating, f.cost_per_session,
-                   6371000 * 2 * asin(sqrt(
-                     (sin((f.lat - ?) * 3.14159265358979 / 360.0)) *
-                     (sin((f.lat - ?) * 3.14159265358979 / 360.0)) +
-                     cos(f.lat * 3.14159265358979 / 180.0) *
-                     cos(? * 3.14159265358979 / 180.0) *
-                     (sin((f.lng - ?) * 3.14159265358979 / 360.0)) *
-                     (sin((f.lng - ?) * 3.14159265358979 / 360.0))
-                   )) AS distance_m
-            FROM facilities f
-            JOIN sports s ON s.id = f.sport_id
-            WHERE s.name = ?
-            HAVING distance_m <= ?
+      sql: `SELECT id, name, address, phone, rating, cost_per_session, distance_m
+            FROM (
+              SELECT f.id, f.name, f.address, f.phone, f.rating, f.cost_per_session,
+                     6371000 * 2 * asin(sqrt(
+                       (sin((f.lat - ?) * 3.14159265358979 / 360.0)) *
+                       (sin((f.lat - ?) * 3.14159265358979 / 360.0)) +
+                       cos(f.lat * 3.14159265358979 / 180.0) *
+                       cos(? * 3.14159265358979 / 180.0) *
+                       (sin((f.lng - ?) * 3.14159265358979 / 360.0)) *
+                       (sin((f.lng - ?) * 3.14159265358979 / 360.0))
+                     )) AS distance_m
+              FROM facilities f
+              JOIN sports s ON s.id = f.sport_id
+              WHERE s.name = ?
+            )
+            WHERE distance_m <= ?
             ORDER BY distance_m
             LIMIT 20`,
       args: [lat, lat, lat, lng, lng, sport, radiusM],
