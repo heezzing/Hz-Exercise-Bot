@@ -162,7 +162,7 @@ export async function chatWithHermes(
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({
-      model: LIGHT,
+      model: HEAVY,
       messages,
       max_tokens: 600,
       temperature: 0.5,

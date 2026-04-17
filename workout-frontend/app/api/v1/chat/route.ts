@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { chatWithHermes, CHAT_SYSTEM_PROMPT } from '@/lib/services/hermes';
 
+export const maxDuration = 60;
+
 export async function POST(req: NextRequest) {
   try {
     const { messages } = await req.json();

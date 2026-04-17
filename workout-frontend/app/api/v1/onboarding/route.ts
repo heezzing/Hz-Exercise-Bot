@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import db from '@/lib/db';
 import { getSportRecommendations } from '@/lib/services/hermes';
+
+export const maxDuration = 60;
 import { vectorSearchSports, filterSportsBySurvey, buildUserPrompt } from '@/lib/services/rag';
 
 export async function POST(req: NextRequest) {
